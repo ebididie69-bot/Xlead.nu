@@ -89,7 +89,7 @@ async def find_businesses(niche: str, country: str, city: str | None, max_leads:
     client_timeout = 30 if city else 90
     overpass_timeout = 25 if city else 75
 
-    async with httpx.AsyncClient(timeout=client_timeout) as client:
+    async with httpx.AsyncClient(timeout=client_timeout, transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0")) as client:
         if city:
             coords = await _geocode_city(client, city, country)
             if not coords:
@@ -166,7 +166,7 @@ async def find_businesses(niche: str, country: str, city: str | None, max_leads:
 
 async def _check_reachability(businesses: list[dict]) -> None:
     """Mutates each business dict's website_reachable: True/False/None."""
-    async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout=8, follow_redirects=True, transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0")) as client:
         for biz in businesses:
             url = biz.get("website")
             if not url:
@@ -189,7 +189,7 @@ async def enrich_with_google_places(db: Session, businesses: list[dict], city: s
     if not api_key:
         return  # silently skip enrichment; core lead data still usable
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=15, transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0")) as client:
         for biz in businesses:
             params = {
                 "query": f"{biz['name']} {city} {country}",
