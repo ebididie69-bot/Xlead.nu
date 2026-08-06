@@ -54,7 +54,12 @@ async def search_leads(req: LeadSearchRequest, db: Session = Depends(get_db), _a
             "large areas). Try a smaller area, a specific city, or try again in a moment.",
         )
     except httpx.HTTPError as exc:
-        raise HTTPException(502, f"Could not reach OpenStreetMap right now: {exc}")
+        # Surface the real underlying OS-level cause (DNS failure, connection
+        # refused, network unreachable, etc.) instead of httpx's generic
+        # summary, so we can tell a routing/DNS issue apart from an actual
+        # IP block by the upstream service.
+        root_cause = repr(exc.__cause__) if exc.__cause__ else repr(exc)
+        raise HTTPException(502, f"Could not reach OpenStreetMap right now: {exc} | root_cause: {root_cause}")
 
     # --- Dedup against past runs for this exact niche+country ---
     # Rule: never re-surface a business we've already emailed for this niche+country
