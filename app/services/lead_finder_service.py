@@ -101,7 +101,11 @@ async def find_businesses(niche: str, country: str, city: str | None, max_leads:
             tag_filters = "".join(f'node{tag}(area:{area_id});' for tag in tags)
             query = f"[out:json][timeout:{overpass_timeout}];({tag_filters});out center {max_leads * 2};"
 
-        resp = await client.post(OVERPASS_URL, data={"data": query})
+        resp = await client.post(
+            OVERPASS_URL,
+            data={"data": query},
+            headers={"User-Agent": "LeadForgeAI/1.0", "Accept": "application/json"},
+        )
         resp.raise_for_status()
         elements = resp.json().get("elements", [])
 
