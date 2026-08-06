@@ -13,7 +13,11 @@ Bing Places) without touching scoring logic.
 import httpx
 from sqlalchemy.orm import Session
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
+]
 
 # Niche -> OSM tag queries. Extend this map as more niches are added.
 NICHE_OSM_TAGS = {
@@ -101,12 +105,26 @@ async def find_businesses(niche: str, country: str, city: str | None, max_leads:
             tag_filters = "".join(f'node{tag}(area:{area_id});' for tag in tags)
             query = f"[out:json][timeout:{overpass_timeout}];({tag_filters});out center {max_leads * 2};"
 
-        resp = await client.post(
-            OVERPASS_URL,
-            data={"data": query},
-            headers={"User-Agent": "LeadForgeAI/1.0", "Accept": "application/json"},
-        )
-        resp.raise_for_status()
+        # Overpass's main server has occasional outages/connectivity blips,
+        # so try each known mirror in turn before giving up.
+        resp = None
+        last_error = None
+        for url in OVERPASS_URLS:
+            try:
+                resp = await client.post(
+                    url,
+                    data={"data": query},
+                    headers={"User-Agent": "LeadForgeAI/1.0", "Accept": "application/json"},
+                )
+                resp.raise_for_status()
+                last_error = None
+                break
+            except httpx.HTTPError as exc:
+                last_error = exc
+                resp = None
+                continue
+        if resp is None:
+            raise last_error
         elements = resp.json().get("elements", [])
 
     results = []
