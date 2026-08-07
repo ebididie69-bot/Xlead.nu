@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.core.security import require_admin
-from app.models import Lead, EmailDraft
+from app.models import Lead, EmailDraft, GeneratedWebsite
 from app.services.lead_scoring import (
     classify_website_status, filter_disqualified, compute_lead_score
 )
@@ -28,6 +28,34 @@ class LeadSearchRequest(BaseModel):
     max_leads: int = 20
 
 
+@router.get("/network-test")
+async def network_test(_admin=Depends(require_admin)):
+    """
+    Diagnostic-only endpoint: tests outbound connectivity from this Render
+    instance to a few different hosts, so we can tell apart 'Render's
+    outbound network is broken in general' from 'this specific host
+    (Overpass) is blocking/rejecting us'. Safe to remove once the Overpass
+    connectivity issue is resolved.
+    """
+    targets = {
+        "github (unrelated control)": "https://api.github.com",
+        "nominatim (already used for geocoding)": "https://nominatim.openstreetmap.org/status",
+        "overpass main": "https://overpass-api.de/api/status",
+        "overpass mirror (kumi)": "https://overpass.kumi.systems/api/status",
+    }
+    results = {}
+    async with httpx.AsyncClient(
+        timeout=10, transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+    ) as client:
+        for label, url in targets.items():
+            try:
+                resp = await client.get(url, headers={"User-Agent": "LeadForgeAI/1.0"})
+                results[label] = f"OK ({resp.status_code})"
+            except Exception as exc:
+                results[label] = f"FAILED: {exc!r}"
+    return results
+
+
 @router.get("/niches")
 def list_niches(_admin=Depends(require_admin)):
     return SUPPORTED_NICHES
@@ -44,14 +72,16 @@ async def search_leads(req: LeadSearchRequest, db: Session = Depends(get_db), _a
 
     try:
         raw_results = await lead_finder_service.find_businesses(
-            niche=req.niche, country=req.country, city=city_clean or None, max_leads=req.max_leads
+            db=db, niche=req.niche, country=req.country, city=city_clean or None, max_leads=req.max_leads
         )
+    except lead_finder_service.PlacesApiError as exc:
+        raise HTTPException(502, f"Google Places API error: {exc}")
     except httpx.TimeoutException:
         scope = "this country" if not city_clean else f"{city_clean}, {req.country}"
         raise HTTPException(
             504,
-            f"The search for {scope} took too long (OpenStreetMap's free API can be slow for "
-            "large areas). Try a smaller area, a specific city, or try again in a moment.",
+            f"The search for {scope} took too long. Try a smaller area, a specific city, "
+            "or try again in a moment.",
         )
     except httpx.HTTPError as exc:
         # Surface the real underlying OS-level cause (DNS failure, connection
@@ -59,7 +89,11 @@ async def search_leads(req: LeadSearchRequest, db: Session = Depends(get_db), _a
         # summary, so we can tell a routing/DNS issue apart from an actual
         # IP block by the upstream service.
         root_cause = repr(exc.__cause__) if exc.__cause__ else repr(exc)
-        raise HTTPException(502, f"Could not reach OpenStreetMap right now: {exc} | root_cause: {root_cause}")
+        raise HTTPException(
+            502,
+            f"Could not reach the business-lookup service right now: {exc} | root_cause: {root_cause}. "
+            "If this keeps happening, add a GOOGLE_PLACES_API_KEY in Settings for a more reliable source.",
+        )
 
     # --- Dedup against past runs for this exact niche+country ---
     # Rule: never re-surface a business we've already emailed for this niche+country
@@ -150,16 +184,37 @@ async def search_leads(req: LeadSearchRequest, db: Session = Depends(get_db), _a
 
 
 @router.get("")
-def list_leads(niche: str | None = None, db: Session = Depends(get_db), _admin=Depends(require_admin)):
+def list_leads(
+    niche: str | None = None,
+    country: str | None = None,
+    city: str | None = None,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
     q = db.query(Lead)
     if niche:
         q = q.filter(Lead.niche == niche)
+    if country:
+        q = q.filter(Lead.country == country)
+    if city:
+        q = q.filter(Lead.city == city)
     leads = q.order_by(Lead.lead_score.desc()).all()
+
+    # Pull existing generated-website demo tokens in one query, so a lead
+    # that already has a demo site shows "Preview" instead of "Generate"
+    # even after the page is closed and reopened — no re-search needed.
+    lead_ids = [l.id for l in leads]
+    tokens_by_lead = {}
+    if lead_ids:
+        for gw in db.query(GeneratedWebsite).filter(GeneratedWebsite.lead_id.in_(lead_ids)).all():
+            tokens_by_lead[gw.lead_id] = gw.demo_token
+
     return [
         {
             "id": l.id, "business_name": l.business_name, "niche": l.niche,
-            "city": l.city, "website_status": l.website_status,
+            "country": l.country, "city": l.city, "website_status": l.website_status,
             "lead_score": l.lead_score, "phone": l.phone, "email": l.email,
+            "demo_token": tokens_by_lead.get(l.id),
         }
         for l in leads
     ]
