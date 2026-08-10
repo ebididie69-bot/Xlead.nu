@@ -1,65 +1,34 @@
 """
 Email generation + sending.
 
-Generation reuses the same Gemini key but a separate prompt/schema from the
-business-analysis one. Sending goes through the Gmail API using the admin's
-own OAuth token (scope requested at login: gmail.send) — never a generic
-SMTP relay, so it sends as the real admin Gmail account and respects Gmail's
-own deliverability/reputation.
+Generation now goes through ai_service.py which tries Grok first, then
+Gemini — so whichever AI key you have configured is used automatically,
+with graceful fallback between providers.
+
+Sending goes through the Gmail API using the admin's own OAuth token
+(scope requested at login: gmail.send) — never a generic SMTP relay,
+so it sends as the real admin Gmail account.
 
 Nothing in this module sends automatically: routers/emails.py only calls
 send_via_gmail() from an explicit "approve and send" action.
 """
 import base64
-import json
 from email.mime.text import MIMEText
 
 import httpx
 from sqlalchemy.orm import Session
 
-from app.core.security import get_setting, decrypt
+from app.core.security import decrypt
 from app.models import AdminIdentity
+from app.services.ai_service import generate_email as _ai_generate_email, AIError
 
-GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-
-EMAIL_SCHEMA = {
-    "subject": "string, <=60 chars, no clickbait/spam trigger words",
-    "body": "string, plain text, 3-4 short paragraphs, no HTML",
-    "cta": "string, one clear next step, e.g. 'Reply if you'd like the free preview link'",
-}
-
-
-class EmailGenerationError(RuntimeError):
-    pass
+# Re-export so routers/emails.py doesn't need changing
+EmailGenerationError = AIError
 
 
 async def generate_email(db: Session, lead: dict, demo_url: str | None) -> dict:
-    api_key = get_setting(db, "GEMINI_API_KEY")
-    if not api_key:
-        raise EmailGenerationError("Gemini API key not configured. Add it in Settings.")
-
-    prompt = f"""You are writing a cold outreach email from a freelance web designer to a
-local business owner who currently has no modern website. Be warm, specific,
-and brief — not salesy or hyped. Mention one concrete, plausible detail about
-their business type. {"Include this exact preview link once in the body: " + demo_url if demo_url else "Do not invent a link."}
-
-Return ONLY a JSON object matching this schema, no markdown or commentary:
-{json.dumps(EMAIL_SCHEMA, indent=2)}
-
-Business:
-{json.dumps(lead, indent=2)}
-"""
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.8, "responseMimeType": "application/json"},
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(f"{GEMINI_ENDPOINT}?key={api_key}", json=payload)
-    if resp.status_code != 200:
-        raise EmailGenerationError(f"Gemini API error {resp.status_code}: {resp.text[:300]}")
-
-    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    return json.loads(text)
+    """Delegates to ai_service.generate_email (Grok-first, Gemini fallback)."""
+    return await _ai_generate_email(db, lead, demo_url)
 
 
 async def send_via_gmail(admin: AdminIdentity, to_email: str, subject: str, body: str) -> str:

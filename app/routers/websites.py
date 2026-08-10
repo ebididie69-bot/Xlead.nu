@@ -9,6 +9,7 @@ from app.database import get_db
 from app.core.security import require_admin
 from app.models import Lead, GeneratedWebsite
 from app.services.gemini_service import analyze_business, GeminiError
+from app.services.ai_service import AIQuotaError, AINotConfiguredError
 from app.services.screenshot_service import capture_homepage_screenshot
 from app.services.image_service import get_business_images
 
@@ -77,6 +78,10 @@ async def generate_website(req: GenerateWebsiteRequest, db: Session = Depends(ge
 
     try:
         analysis = await analyze_business(db, lead_dict, lead.niche)
+    except AIQuotaError as e:
+        raise HTTPException(429, f"AI quota exceeded: {e}. Both Grok and Gemini rate limits hit — wait a few minutes and try again.")
+    except AINotConfiguredError as e:
+        raise HTTPException(422, str(e))
     except GeminiError as e:
         raise HTTPException(502, str(e))
 
@@ -130,6 +135,10 @@ async def regenerate_content(website_id: str, db: Session = Depends(get_db), _ad
     }
     try:
         analysis = await analyze_business(db, lead_dict, lead.niche)
+    except AIQuotaError as e:
+        raise HTTPException(429, f"AI quota exceeded: {e}. Both Grok and Gemini rate limits hit — wait a few minutes and try again.")
+    except AINotConfiguredError as e:
+        raise HTTPException(422, str(e))
     except GeminiError as e:
         raise HTTPException(502, str(e))
 

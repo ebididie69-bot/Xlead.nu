@@ -1,5 +1,5 @@
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -226,3 +226,138 @@ def get_lead(lead_id: str, db: Session = Depends(get_db), _admin=Depends(require
     if not lead:
         raise HTTPException(404, "Lead not found")
     return {c.name: getattr(lead, c.name) for c in lead.__table__.columns}
+
+
+# ---------------------------------------------------------------------------
+# Import endpoint — called by the Termux lead_finder.py script directly,
+# not by the browser UI. Uses a simple API token (IMPORT_API_KEY env var)
+# instead of the Google OAuth session cookie since Termux can't do browser
+# logins. Returns a summary of how many leads were added vs skipped.
+# ---------------------------------------------------------------------------
+
+class ImportedBusiness(BaseModel):
+    name: str
+    niche: str
+    country: str
+    city: str | None = None
+    address: str | None = None
+    phone: str | None = None
+    email: str | None = None
+    website: str | None = None
+    facebook: str | None = None
+    instagram: str | None = None
+    google_rating: float | None = None
+    review_count: int | None = None
+    source_id: str | None = None   # OSM id or Google place_id for dedup
+    source: str = "termux_import"
+
+
+class ImportRequest(BaseModel):
+    businesses: list[ImportedBusiness]
+
+
+def _require_import_token(request: Request):
+    import os
+    expected = os.getenv("IMPORT_API_KEY", "")
+    if not expected:
+        raise HTTPException(503, "Import endpoint not configured on this server (IMPORT_API_KEY not set).")
+    token = request.headers.get("X-Import-Token", "")
+    if not token or token != expected:
+        raise HTTPException(401, "Invalid or missing X-Import-Token header.")
+
+
+@router.post("/import")
+async def import_leads(
+    req: ImportRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Bulk import leads from the Termux lead_finder.py script.
+    Authenticated via X-Import-Token header (IMPORT_API_KEY env var on Render).
+    Deduplicates against existing leads using source_id and name+city combo.
+    Returns counts of added/skipped/already_emailed.
+    """
+    _require_import_token(request)
+
+    from app.services.lead_scoring import classify_website_status, filter_disqualified, compute_lead_score
+
+    # Build dedup sets from existing leads
+    existing_leads = db.query(Lead).all()
+    seen_source_ids = set()
+    seen_name_city = set()
+    already_emailed_ids = set()
+
+    for l in existing_leads:
+        src_id = (l.raw_source_data or {}).get("osm_id")
+        if src_id:
+            seen_source_ids.add(src_id)
+        seen_name_city.add((l.business_name.strip().lower(), (l.city or "").strip().lower()))
+
+        # Check if already emailed for this source_id
+        has_sent = any(d.status == "sent" for d in l.email_drafts)
+        if has_sent and src_id:
+            already_emailed_ids.add(src_id)
+
+    added = []
+    skipped_dedup = 0
+    skipped_emailed = 0
+    skipped_disqualified = 0
+
+    for biz in req.businesses:
+        src_id = biz.source_id
+
+        # Skip if already emailed
+        if src_id and src_id in already_emailed_ids:
+            skipped_emailed += 1
+            continue
+
+        # Skip if already in DB (by source_id or name+city)
+        name_key = (biz.name.strip().lower(), (biz.city or "").strip().lower())
+        if (src_id and src_id in seen_source_ids) or name_key in seen_name_city:
+            skipped_dedup += 1
+            continue
+
+        # Score and classify
+        biz_dict = biz.model_dump()
+        website_status = classify_website_status(biz_dict)
+        if filter_disqualified(website_status):
+            skipped_disqualified += 1
+            continue
+
+        score = compute_lead_score(biz_dict, website_status)
+
+        lead = Lead(
+            business_name=biz.name,
+            niche=biz.niche,
+            country=biz.country,
+            city=biz.city,
+            address=biz.address,
+            phone=biz.phone,
+            email=biz.email,
+            website=biz.website,
+            facebook=biz.facebook,
+            instagram=biz.instagram,
+            google_rating=biz.google_rating,
+            review_count=biz.review_count,
+            website_status=website_status,
+            lead_score=score,
+            raw_source_data={"osm_id": src_id, "source": biz.source},
+        )
+        db.add(lead)
+        added.append(biz.name)
+
+        # Track for within-batch dedup
+        if src_id:
+            seen_source_ids.add(src_id)
+        seen_name_city.add(name_key)
+
+    db.commit()
+
+    return {
+        "added": len(added),
+        "skipped_already_in_db": skipped_dedup,
+        "skipped_already_emailed": skipped_emailed,
+        "skipped_disqualified": skipped_disqualified,
+        "added_names": added,
+    }
