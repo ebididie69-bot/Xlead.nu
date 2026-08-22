@@ -3,14 +3,11 @@ Unified AI service for LeadForge.
 
 Priority:
   1. Groq Cloud — tried first if GROK_API_KEY is configured in Settings.
-     Groq runs open-source models (Llama, Mixtral) at ultra-fast speed
-     with a generous free tier — no billing required to start.
-     Get a free key at https://console.groq.com
-  2. Gemini (Google) — fallback if Groq isn't configured, or if Groq
-     returns a quota/rate-limit error (429).
+     Get a free key at https://console.groq.com (no credit card needed).
+  2. Gemini (Google) — fallback if Groq isn't configured or quota hit.
 
-Both providers return raw JSON only. The same schema is sent to whichever
-model runs, so output is identical regardless of provider.
+Model: openai/gpt-oss-120b on Groq (replaces deprecated llama-3.3-70b-versatile
+as of June 2026). Falls back to gpt-oss-20b if 120b is unavailable.
 """
 import json
 import httpx
@@ -19,7 +16,11 @@ from sqlalchemy.orm import Session
 from app.core.security import get_setting
 
 GROK_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-GROK_MODEL = "llama-3.3-70b-versatile"
+GROK_MODELS = [
+    "openai/gpt-oss-120b",   # primary — recommended Groq replacement for llama-3.3-70b
+    "openai/gpt-oss-20b",    # fallback if 120b unavailable
+    "qwen/qwen3.6-27b",      # second fallback
+]
 
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
@@ -42,7 +43,7 @@ BUSINESS_ANALYSIS_SCHEMA = {
 EMAIL_SCHEMA = {
     "subject": "string <=60 chars no spam words",
     "body": "string plain text 3-4 short paragraphs no HTML",
-    "cta": "string one clear next step",
+    "cta": "string one clear next step e.g. 'Reply to get your free demo link'",
 }
 
 
@@ -57,28 +58,42 @@ class AINotConfiguredError(AIError):
 
 
 async def _call_groq(api_key: str, prompt: str) -> str:
-    payload = {
-        "model": GROK_MODEL,
-        "messages": [
-            {"role": "system", "content": "You are a branding and copywriting assistant. Always respond with raw JSON only — no markdown, no code fences, no commentary."},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.7,
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
-            GROK_ENDPOINT,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-        )
-    if resp.status_code == 429:
-        raise AIQuotaError(f"Groq quota exceeded: {resp.text[:200]}")
-    if resp.status_code != 200:
-        raise AIError(f"Groq API error {resp.status_code}: {resp.text[:300]}")
-    try:
-        return resp.json()["choices"][0]["message"]["content"]
-    except (KeyError, IndexError) as e:
-        raise AIError(f"Unexpected Groq response: {e}")
+    """Try each Groq model in order until one works."""
+    last_error = None
+    for model in GROK_MODELS:
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a branding and copywriting assistant. "
+                        "Always respond with raw JSON only — no markdown, "
+                        "no code fences, no commentary before or after."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.7,
+        }
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                GROK_ENDPOINT,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                json=payload,
+            )
+        if resp.status_code == 429:
+            raise AIQuotaError(f"Groq quota exceeded: {resp.text[:200]}")
+        if resp.status_code == 404:
+            last_error = AIError(f"Model {model} not found on Groq, trying next…")
+            continue  # try next model
+        if resp.status_code != 200:
+            raise AIError(f"Groq API error {resp.status_code}: {resp.text[:300]}")
+        try:
+            return resp.json()["choices"][0]["message"]["content"]
+        except (KeyError, IndexError) as e:
+            raise AIError(f"Unexpected Groq response: {e}")
+    raise last_error or AIError("All Groq models failed.")
 
 
 async def _call_gemini(api_key: str, prompt: str) -> str:
@@ -104,7 +119,7 @@ async def _generate(db: Session, prompt: str) -> dict:
 
     if not groq_key and not gemini_key:
         raise AINotConfiguredError(
-            "No AI key configured. Add a GROK_API_KEY (from console.groq.com, free) "
+            "No AI key configured. Add a GROK_API_KEY (free at console.groq.com) "
             "or GEMINI_API_KEY in Settings."
         )
 
@@ -126,9 +141,7 @@ async def _generate(db: Session, prompt: str) -> dict:
             raw_text = None
 
     if raw_text is None:
-        if last_error:
-            raise last_error
-        raise AINotConfiguredError("No AI provider available.")
+        raise (last_error or AINotConfiguredError("No AI provider available."))
 
     raw_text = raw_text.strip()
     if raw_text.startswith("```"):
@@ -155,6 +168,7 @@ Rules:
 - Output ONLY the raw JSON object. No preamble, no commentary, no ``` fences.
 - Only include sections in enabled_sections that make sense for this business.
 - Keep copy specific to this business niche and location, not generic filler.
+- Make testimonials sound plausible and natural, not obviously fake.
 """
     return await _generate(db, prompt)
 
@@ -164,11 +178,12 @@ async def generate_email(db: Session, lead: dict, demo_url: str | None) -> dict:
         f"Include this exact preview link once in the body: {demo_url}"
         if demo_url else "Do not invent a link."
     )
-    prompt = f"""You are writing a cold outreach email from a freelance web designer to a
-local business owner who currently has no modern website. Be warm, specific,
-and brief. {link_instruction}
+    prompt = f"""You are writing a cold outreach EMAIL (not SMS, not WhatsApp — a professional email)
+from a freelance web designer to a local business owner who currently has no modern website.
+Be warm, specific, and brief — not salesy or hyped. Mention one concrete, plausible detail
+about their business type. {link_instruction}
 
-Return ONLY a JSON object matching this schema, no markdown:
+Return ONLY a JSON object matching this schema, no markdown or commentary:
 {json.dumps(EMAIL_SCHEMA, indent=2)}
 
 Business:

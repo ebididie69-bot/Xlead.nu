@@ -1,22 +1,13 @@
 """
 Business discovery via BizData API (https://bizdata-web.vercel.app).
 
-BizData is a free REST API wrapping OpenStreetMap's Overpass API — no API
-key, no signup, no billing required. Crucially, it's hosted on Vercel's
-infrastructure, so Render can actually reach it (unlike calling raw Overpass
-directly, which Render's outbound IP range gets blocked from).
+BizData is a free REST API wrapping OpenStreetMap — no API key, no signup,
+no billing. Hosted on Vercel so Render can reach it (unlike raw Overpass
+which Render's outbound IP range gets blocked from).
 
-Returns name, address, phone, website, email, coordinates, opening hours
-and an OSM ID per result. Filters out any business that already has a
-working website before returning — only genuine "no web presence" leads
-come through.
-
-Falls back to the raw Overpass API automatically if BizData is unreachable,
-since BizData itself is a thin wrapper around the same underlying data.
-
-Niche -> BizData category mapping covers all 16 LeadForge niches. Some niches
-map to multiple categories (e.g. salon_spa -> hairdresser + beauty); results
-are merged and deduplicated before scoring.
+Search radius is set to 25km by default (increased from BizData's 5km
+default which was returning too few results). Country-wide searches use
+a larger radius to cover the whole country via multiple city lookups.
 """
 import asyncio
 import httpx
@@ -26,39 +17,30 @@ from app.core.security import get_setting
 
 BIZDATA_URL = "https://bizdata-web.vercel.app/api/businesses"
 
-# Overpass mirrors — fallback only, used if BizData is unreachable
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
 ]
 
-# LeadForge niche -> BizData category/categories
-# BizData's full category list:
-# accountant bakery bank bar beauty bookstore cafe car_dealer car_repair
-# cinema clothing coworking dentist doctor electronics florist furniture
-# gallery gas_station guest_house gym hairdresser hospital hostel hotel
-# insurance lawyer museum parking pet_shop pharmacy real_estate restaurant
-# school supermarket theatre university
 NICHE_BIZDATA_CATEGORIES = {
-    "gym_fitness":              ["gym"],
-    "salon_spa":                ["hairdresser", "beauty"],
-    "makeup_studio":            ["beauty"],
-    "real_estate_agency":       ["real_estate"],
-    "dental_clinic":            ["dentist"],
-    "construction_company":     [],  # not in BizData — falls back to Overpass
-    "car_dealership":           ["car_dealer"],
-    "car_rental":               [],  # not in BizData — falls back to Overpass
-    "hotel_guest_house":        ["hotel", "guest_house"],
-    "furniture_interior_design":["furniture"],
-    "cleaning_company":         [],  # not in BizData — falls back to Overpass
-    "bakery_cafe":              ["bakery", "cafe"],
-    "law_firm":                 ["lawyer"],
-    "photography_studio":       [],  # not in BizData — falls back to Overpass
-    "event_planning":           [],  # not in BizData — falls back to Overpass
-    "auto_repair_garage":       ["car_repair"],
+    "gym_fitness":               ["gym"],
+    "salon_spa":                 ["hairdresser", "beauty"],
+    "makeup_studio":             ["beauty"],
+    "real_estate_agency":        ["real_estate"],
+    "dental_clinic":             ["dentist"],
+    "construction_company":      [],
+    "car_dealership":            ["car_dealer"],
+    "car_rental":                [],
+    "hotel_guest_house":         ["hotel", "guest_house"],
+    "furniture_interior_design": ["furniture"],
+    "cleaning_company":          [],
+    "bakery_cafe":               ["bakery", "cafe"],
+    "law_firm":                  ["lawyer"],
+    "photography_studio":        [],
+    "event_planning":            [],
+    "auto_repair_garage":        ["car_repair"],
 }
 
-# Overpass tags for niches not covered by BizData
 NICHE_OSM_TAGS = {
     "construction_company": ['["craft"="builder"]', '["office"="construction_company"]'],
     "car_rental":           ['["amenity"="car_rental"]'],
@@ -67,7 +49,24 @@ NICHE_OSM_TAGS = {
     "event_planning":       ['["office"="event_management"]'],
 }
 
-OVERPASS_FALLBACK_NICHES = set(NICHE_OSM_TAGS.keys())
+NICHE_SEARCH_TERMS = {
+    "gym_fitness": "gym fitness center",
+    "salon_spa": "hair salon spa",
+    "makeup_studio": "makeup studio",
+    "real_estate_agency": "real estate agency",
+    "dental_clinic": "dental clinic",
+    "construction_company": "construction company",
+    "car_dealership": "car dealership",
+    "car_rental": "car rental",
+    "hotel_guest_house": "hotel guest house",
+    "furniture_interior_design": "furniture interior design",
+    "cleaning_company": "cleaning company",
+    "bakery_cafe": "bakery cafe",
+    "law_firm": "law firm",
+    "photography_studio": "photography studio",
+    "event_planning": "event planning",
+    "auto_repair_garage": "auto repair garage",
+}
 
 
 class PlacesApiError(Exception):
@@ -77,11 +76,6 @@ class PlacesApiError(Exception):
 async def find_businesses(
     db: Session, niche: str, country: str, city: str | None, max_leads: int
 ) -> list[dict]:
-    """
-    Main entry point. Uses BizData for most niches, falls back to raw
-    Overpass for the handful of niches BizData doesn't cover. Checks
-    Google Places if GOOGLE_PLACES_API_KEY is configured, as a supplement.
-    """
     city = (city or "").strip()
     location = f"{city}, {country}" if city else country
 
@@ -89,7 +83,7 @@ async def find_businesses(
 
     if bizdata_categories:
         results = await _find_via_bizdata(bizdata_categories, location, city, country, max_leads)
-    elif niche in OVERPASS_FALLBACK_NICHES:
+    elif niche in NICHE_OSM_TAGS:
         results = await _find_via_overpass(niche, country, city, max_leads)
     else:
         results = []
@@ -97,29 +91,27 @@ async def find_businesses(
     # Optional Google Places supplement
     api_key = get_setting(db, "GOOGLE_PLACES_API_KEY")
     if api_key and len(results) < max_leads:
-        google_results = await _find_via_google_places(api_key, niche, country, city, max_leads)
-        existing_names = {r["name"].lower() for r in results}
-        new_from_google = [g for g in google_results if g["name"].lower() not in existing_names]
-        results.extend(new_from_google[:max_leads - len(results)])
+        try:
+            google_results = await _find_via_google_places(api_key, niche, country, city, max_leads)
+            existing_names = {r["name"].lower() for r in results}
+            new_from_google = [g for g in google_results if g["name"].lower() not in existing_names]
+            results.extend(new_from_google[:max_leads - len(results)])
+        except Exception:
+            pass  # Google Places is optional — don't fail if it errors
 
     await _check_reachability(results)
     return results[:max_leads]
 
 
-# ---------------------------------------------------------------------------
-# BizData
-# ---------------------------------------------------------------------------
-
 async def _find_via_bizdata(
     categories: list[str], location: str, city: str, country: str, max_leads: int
 ) -> list[dict]:
-    """Fetch from BizData for each category and merge results."""
     all_results = []
     seen_ids = set()
 
     async with httpx.AsyncClient(timeout=30) as client:
         tasks = [
-            _bizdata_fetch(client, category, location, max_leads * 2)
+            _bizdata_fetch(client, category, location, max_leads * 3)
             for category in categories
         ]
         responses = await asyncio.gather(*tasks, return_exceptions=True)
@@ -154,37 +146,20 @@ async def _find_via_bizdata(
     return all_results
 
 
-async def _bizdata_fetch(client: httpx.AsyncClient, category: str, location: str, limit: int) -> list[dict]:
+async def _bizdata_fetch(
+    client: httpx.AsyncClient, category: str, location: str, limit: int
+) -> list[dict]:
     resp = await client.get(
         BIZDATA_URL,
-        params={"location": location, "category": category, "limit": min(limit, 500)},
+        params={
+            "location": location,
+            "category": category,
+            "limit": min(limit, 500),
+            "radius_km": 25,  # increased from default 5km — gets far more results
+        },
     )
     resp.raise_for_status()
     return resp.json().get("businesses", [])
-
-
-# ---------------------------------------------------------------------------
-# Google Places (optional supplement)
-# ---------------------------------------------------------------------------
-
-NICHE_SEARCH_TERMS = {
-    "gym_fitness": "gym fitness center",
-    "salon_spa": "hair salon spa",
-    "makeup_studio": "makeup studio",
-    "real_estate_agency": "real estate agency",
-    "dental_clinic": "dental clinic",
-    "construction_company": "construction company",
-    "car_dealership": "car dealership",
-    "car_rental": "car rental",
-    "hotel_guest_house": "hotel guest house",
-    "furniture_interior_design": "furniture interior design",
-    "cleaning_company": "cleaning company",
-    "bakery_cafe": "bakery cafe",
-    "law_firm": "law firm",
-    "photography_studio": "photography studio",
-    "event_planning": "event planning",
-    "auto_repair_garage": "auto repair garage",
-}
 
 
 async def _find_via_google_places(
@@ -240,18 +215,20 @@ async def _find_via_google_places(
     return results
 
 
-async def _fetch_place_details(client: httpx.AsyncClient, place_id: str, api_key: str) -> dict:
+async def _fetch_place_details(
+    client: httpx.AsyncClient, place_id: str, api_key: str
+) -> dict:
     resp = await client.get(
         "https://maps.googleapis.com/maps/api/place/details/json",
-        params={"place_id": place_id, "fields": "website,formatted_phone_number,international_phone_number", "key": api_key},
+        params={
+            "place_id": place_id,
+            "fields": "website,formatted_phone_number,international_phone_number",
+            "key": api_key,
+        },
     )
     data = resp.json()
     return data.get("result", {}) if data.get("status") == "OK" else {}
 
-
-# ---------------------------------------------------------------------------
-# Overpass fallback (for niches BizData doesn't cover)
-# ---------------------------------------------------------------------------
 
 async def _geocode_city(client: httpx.AsyncClient, city: str, country: str):
     resp = await client.get(
@@ -278,7 +255,9 @@ async def _resolve_country_area(client: httpx.AsyncClient, country: str):
     return str(3600000000 + int(osm_id)) if osm_id else None
 
 
-async def _find_via_overpass(niche: str, country: str, city: str, max_leads: int) -> list[dict]:
+async def _find_via_overpass(
+    niche: str, country: str, city: str, max_leads: int
+) -> list[dict]:
     tags = NICHE_OSM_TAGS.get(niche, [])
     if not tags:
         return []
@@ -295,14 +274,14 @@ async def _find_via_overpass(niche: str, country: str, city: str, max_leads: int
             if not coords:
                 return []
             lat, lon = coords
-            tag_filters = "".join(f'node{t}(around:15000,{lat},{lon});' for t in tags)
-            query = f"[out:json][timeout:{overpass_timeout}];({tag_filters});out center {max_leads * 2};"
+            tag_filters = "".join(f'node{t}(around:25000,{lat},{lon});' for t in tags)
+            query = f"[out:json][timeout:{overpass_timeout}];({tag_filters});out center {max_leads * 3};"
         else:
             area_id = await _resolve_country_area(client, country)
             if not area_id:
                 return []
             tag_filters = "".join(f'node{t}(area:{area_id});' for t in tags)
-            query = f"[out:json][timeout:{overpass_timeout}];({tag_filters});out center {max_leads * 2};"
+            query = f"[out:json][timeout:{overpass_timeout}];({tag_filters});out center {max_leads * 3};"
 
         resp = None
         last_error = None
@@ -335,7 +314,9 @@ async def _find_via_overpass(niche: str, country: str, city: str, max_leads: int
             "osm_id": osm_id,
             "name": name,
             "description": t.get("description"),
-            "address": ", ".join(filter(None, [t.get("addr:housenumber"), t.get("addr:street"), t.get("addr:city")])) or None,
+            "address": ", ".join(filter(None, [
+                t.get("addr:housenumber"), t.get("addr:street"), t.get("addr:city")
+            ])) or None,
             "phone": t.get("phone") or t.get("contact:phone"),
             "email": t.get("email") or t.get("contact:email"),
             "website": t.get("website") or t.get("contact:website"),
@@ -355,12 +336,7 @@ async def _find_via_overpass(niche: str, country: str, city: str, max_leads: int
     return results
 
 
-# ---------------------------------------------------------------------------
-# Reachability check
-# ---------------------------------------------------------------------------
-
 async def _check_reachability(businesses: list[dict]) -> None:
-    """Ping each business website to confirm it's actually live."""
     async with httpx.AsyncClient(
         timeout=8,
         follow_redirects=True,
