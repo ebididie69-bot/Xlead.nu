@@ -2,19 +2,15 @@
 Unified AI service for LeadForge.
 
 Priority:
-  1. Grok (xAI) — tried first if GROK_API_KEY is configured in Settings.
-     xAI's free tier is more generous than Gemini's.
-  2. Gemini (Google) — fallback if Grok isn't configured, or if Grok itself
+  1. Groq Cloud — tried first if GROK_API_KEY is configured in Settings.
+     Groq runs open-source models (Llama, Mixtral) at ultra-fast speed
+     with a generous free tier — no billing required to start.
+     Get a free key at https://console.groq.com
+  2. Gemini (Google) — fallback if Groq isn't configured, or if Groq
      returns a quota/rate-limit error (429).
 
-Both providers are asked for raw JSON only — no markdown, no HTML. The same
-BUSINESS_ANALYSIS_SCHEMA and EMAIL_SCHEMA are sent to whichever model runs,
-so the output contract is identical regardless of which provider handles it.
-
-Graceful degradation: a 429 from either provider is caught and re-raised as
-AIQuotaError (a distinct subclass), so callers can decide whether to retry
-with the other provider or return a friendlier error to the user — rather
-than surfacing a raw 429 as an uncaught crash.
+Both providers return raw JSON only. The same schema is sent to whichever
+model runs, so output is identical regardless of provider.
 """
 import json
 import httpx
@@ -22,68 +18,49 @@ from sqlalchemy.orm import Session
 
 from app.core.security import get_setting
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-GROK_ENDPOINT = "https://api.x.ai/v1/chat/completions"
-GROK_MODEL = "grok-3-mini"  # cheapest/fastest xAI model; swap to "grok-3" for higher quality
+GROK_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
+GROK_MODEL = "llama-3.3-70b-versatile"
 
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
-# ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
 BUSINESS_ANALYSIS_SCHEMA = {
-    "business_tone": "string, e.g. 'warm and professional' or 'bold and energetic'",
-    "target_audience": "string, one sentence",
+    "business_tone": "string e.g. 'warm and professional'",
+    "target_audience": "string one sentence",
     "brand_colors": {"primary": "#hex", "secondary": "#hex", "accent": "#hex"},
-    "hero_title": "string, <= 8 words",
-    "hero_subtitle": "string, <= 20 words",
-    "about": "string, 2-3 sentences",
+    "hero_title": "string <= 8 words",
+    "hero_subtitle": "string <= 20 words",
+    "about": "string 2-3 sentences",
     "services": [{"title": "string", "description": "string"}],
     "testimonials": [{"name": "string", "quote": "string", "role": "string"}],
     "faq": [{"question": "string", "answer": "string"}],
     "call_to_action": {"headline": "string", "button_text": "string"},
-    "seo": {"title": "string, <=60 chars", "description": "string, <=155 chars", "keywords": ["string"]},
-    "theme_recommendation": "string, one of: light | dark | warm | bold | minimal",
-    "enabled_sections": ["hero", "about", "services", "gallery", "testimonials", "faq", "contact", "map", "footer"],
+    "seo": {"title": "string <=60 chars", "description": "string <=155 chars", "keywords": ["string"]},
+    "theme_recommendation": "one of: light | dark | warm | bold | minimal",
+    "enabled_sections": ["hero","about","services","gallery","testimonials","faq","contact","map","footer"],
 }
 
 EMAIL_SCHEMA = {
-    "subject": "string, <=60 chars, no clickbait/spam trigger words",
-    "body": "string, plain text, 3-4 short paragraphs, no HTML",
-    "cta": "string, one clear next step, e.g. 'Reply if you'd like the free preview link'",
+    "subject": "string <=60 chars no spam words",
+    "body": "string plain text 3-4 short paragraphs no HTML",
+    "cta": "string one clear next step",
 }
 
-# ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
+
 class AIError(RuntimeError):
-    """Base class for all AI service errors."""
+    pass
 
 class AIQuotaError(AIError):
-    """Raised when a provider returns 429 (quota/rate-limit exceeded)."""
+    pass
 
 class AINotConfiguredError(AIError):
-    """Raised when neither Grok nor Gemini keys are configured."""
+    pass
 
 
-# ---------------------------------------------------------------------------
-# Internal: provider calls
-# ---------------------------------------------------------------------------
-async def _call_grok(api_key: str, prompt: str) -> str:
-    """Call Grok and return the raw text response. Raises AIQuotaError on 429."""
+async def _call_groq(api_key: str, prompt: str) -> str:
     payload = {
         "model": GROK_MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a branding and copywriting assistant. "
-                    "You always respond with raw JSON only — no markdown, "
-                    "no code fences, no commentary before or after the JSON."
-                ),
-            },
+            {"role": "system", "content": "You are a branding and copywriting assistant. Always respond with raw JSON only — no markdown, no code fences, no commentary."},
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.7,
@@ -95,17 +72,16 @@ async def _call_grok(api_key: str, prompt: str) -> str:
             json=payload,
         )
     if resp.status_code == 429:
-        raise AIQuotaError(f"Grok quota exceeded: {resp.text[:200]}")
+        raise AIQuotaError(f"Groq quota exceeded: {resp.text[:200]}")
     if resp.status_code != 200:
-        raise AIError(f"Grok API error {resp.status_code}: {resp.text[:300]}")
+        raise AIError(f"Groq API error {resp.status_code}: {resp.text[:300]}")
     try:
         return resp.json()["choices"][0]["message"]["content"]
     except (KeyError, IndexError) as e:
-        raise AIError(f"Unexpected Grok response shape: {e}")
+        raise AIError(f"Unexpected Groq response: {e}")
 
 
 async def _call_gemini(api_key: str, prompt: str) -> str:
-    """Call Gemini and return the raw text response. Raises AIQuotaError on 429."""
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.7, "responseMimeType": "application/json"},
@@ -119,37 +95,29 @@ async def _call_gemini(api_key: str, prompt: str) -> str:
     try:
         return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError) as e:
-        raise AIError(f"Unexpected Gemini response shape: {e}")
+        raise AIError(f"Unexpected Gemini response: {e}")
 
 
 async def _generate(db: Session, prompt: str) -> dict:
-    """
-    Try Grok first, fall back to Gemini on quota errors or if Grok isn't
-    configured. Raises AINotConfiguredError if neither key is set, and
-    AIQuotaError only if both providers are quota-exhausted simultaneously
-    (extremely unlikely, but handled cleanly).
-    """
-    grok_key = get_setting(db, "GROK_API_KEY")
+    groq_key = get_setting(db, "GROK_API_KEY")
     gemini_key = get_setting(db, "GEMINI_API_KEY")
 
-    if not grok_key and not gemini_key:
+    if not groq_key and not gemini_key:
         raise AINotConfiguredError(
-            "No AI key configured. Add a GROK_API_KEY or GEMINI_API_KEY in Settings."
+            "No AI key configured. Add a GROK_API_KEY (from console.groq.com, free) "
+            "or GEMINI_API_KEY in Settings."
         )
 
     raw_text = None
     last_error = None
 
-    # --- Try Grok first ---
-    if grok_key:
+    if groq_key:
         try:
-            raw_text = await _call_grok(grok_key, prompt)
+            raw_text = await _call_groq(groq_key, prompt)
         except AIQuotaError as e:
             last_error = e
-            raw_text = None  # fall through to Gemini
-        # Any other AIError propagates immediately — it's a real config/API problem
+            raw_text = None
 
-    # --- Fall back to Gemini ---
     if raw_text is None and gemini_key:
         try:
             raw_text = await _call_gemini(gemini_key, prompt)
@@ -159,10 +127,9 @@ async def _generate(db: Session, prompt: str) -> dict:
 
     if raw_text is None:
         if last_error:
-            raise last_error  # both quota-exhausted
+            raise last_error
         raise AINotConfiguredError("No AI provider available.")
 
-    # Strip accidental markdown fences some models add despite instructions
     raw_text = raw_text.strip()
     if raw_text.startswith("```"):
         raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
@@ -170,20 +137,13 @@ async def _generate(db: Session, prompt: str) -> dict:
     try:
         return json.loads(raw_text)
     except json.JSONDecodeError as e:
-        raise AIError(f"AI did not return valid JSON: {e}\nRaw response: {raw_text[:300]}")
+        raise AIError(f"AI did not return valid JSON: {e}\nRaw: {raw_text[:300]}")
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 async def analyze_business(db: Session, lead: dict, niche: str) -> dict:
-    """
-    Generate structured website content for a lead. Returns a dict matching
-    BUSINESS_ANALYSIS_SCHEMA. Raises AIError subclasses on failure.
-    """
     prompt = f"""You are a branding and copywriting assistant for a web design agency.
-Given the public business information below, produce a JSON object that matches
-EXACTLY this schema (same keys, no extra keys, no markdown, no HTML, no code fences):
+Given the business information below, produce a JSON object matching EXACTLY this schema
+(same keys, no extra keys, no markdown, no code fences):
 
 {json.dumps(BUSINESS_ANALYSIS_SCHEMA, indent=2)}
 
@@ -193,31 +153,22 @@ Business information:
 
 Rules:
 - Output ONLY the raw JSON object. No preamble, no commentary, no ``` fences.
-- Only include sections in enabled_sections that make sense for this business
-  (e.g. omit "gallery" if there's no indication of visual products/spaces).
-- Testimonials should read as plausible generic examples, not claims about
-  real named customers, since none were provided.
-- Keep copy specific to this business's actual niche and location, not generic filler.
+- Only include sections in enabled_sections that make sense for this business.
+- Keep copy specific to this business niche and location, not generic filler.
 """
     return await _generate(db, prompt)
 
 
 async def generate_email(db: Session, lead: dict, demo_url: str | None) -> dict:
-    """
-    Generate a personalized cold outreach email for a lead. Returns a dict
-    matching EMAIL_SCHEMA. Raises AIError subclasses on failure.
-    """
     link_instruction = (
         f"Include this exact preview link once in the body: {demo_url}"
-        if demo_url
-        else "Do not invent a link."
+        if demo_url else "Do not invent a link."
     )
     prompt = f"""You are writing a cold outreach email from a freelance web designer to a
 local business owner who currently has no modern website. Be warm, specific,
-and brief — not salesy or hyped. Mention one concrete, plausible detail about
-their business type. {link_instruction}
+and brief. {link_instruction}
 
-Return ONLY a JSON object matching this schema, no markdown or commentary:
+Return ONLY a JSON object matching this schema, no markdown:
 {json.dumps(EMAIL_SCHEMA, indent=2)}
 
 Business:
