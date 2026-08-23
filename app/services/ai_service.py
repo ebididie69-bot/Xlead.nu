@@ -6,8 +6,10 @@ Priority:
      Get a free key at https://console.groq.com (no credit card needed).
   2. Gemini (Google) — fallback if Groq isn't configured or quota hit.
 
-Model: openai/gpt-oss-120b on Groq (replaces deprecated llama-3.3-70b-versatile
-as of June 2026). Falls back to gpt-oss-20b if 120b is unavailable.
+IMPORTANT: brand_colors and theme_recommendation are intentionally EXCLUDED
+from BUSINESS_ANALYSIS_SCHEMA. Each template has its own fixed premium color
+palette — the AI provides content only, never design decisions. Colors must
+never be overridden by AI output.
 """
 import json
 import httpx
@@ -17,33 +19,36 @@ from app.core.security import get_setting
 
 GROK_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 GROK_MODELS = [
-    "openai/gpt-oss-120b",   # primary — recommended Groq replacement for llama-3.3-70b
-    "openai/gpt-oss-20b",    # fallback if 120b unavailable
-    "qwen/qwen3.6-27b",      # second fallback
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b",
+    "llama3-70b-8192",
 ]
 
 GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
+# NO brand_colors, NO theme_recommendation, NO business_tone, NO target_audience.
+# Templates have fixed premium palettes — AI writes copy only.
 BUSINESS_ANALYSIS_SCHEMA = {
-    "business_tone": "string e.g. 'warm and professional'",
-    "target_audience": "string one sentence",
-    "brand_colors": {"primary": "#hex", "secondary": "#hex", "accent": "#hex"},
-    "hero_title": "string <= 8 words",
-    "hero_subtitle": "string <= 20 words",
-    "about": "string 2-3 sentences",
-    "services": [{"title": "string", "description": "string"}],
-    "testimonials": [{"name": "string", "quote": "string", "role": "string"}],
-    "faq": [{"question": "string", "answer": "string"}],
-    "call_to_action": {"headline": "string", "button_text": "string"},
-    "seo": {"title": "string <=60 chars", "description": "string <=155 chars", "keywords": ["string"]},
-    "theme_recommendation": "one of: light | dark | warm | bold | minimal",
-    "enabled_sections": ["hero","about","services","gallery","testimonials","faq","contact","map","footer"],
+    "hero_title": "string <= 8 words, punchy and specific to this business niche",
+    "hero_subtitle": "string <= 20 words, one clear value proposition for this business",
+    "about": "string, 2-3 sentences about this specific business, warm and credible",
+    "services": [{"title": "string", "description": "string, 1-2 sentences"}],
+    "testimonials": [{"name": "string", "quote": "string, authentic-sounding", "role": "string e.g. Regular Client"}],
+    "faq": [{"question": "string", "answer": "string, clear and concise"}],
+    "call_to_action": {"headline": "string", "button_text": "string, action-oriented"},
+    "seo": {
+        "title": "string <=60 chars",
+        "description": "string <=155 chars",
+        "keywords": ["string"]
+    },
+    "enabled_sections": ["hero", "about", "services", "gallery", "testimonials", "faq", "contact", "footer"],
 }
 
 EMAIL_SCHEMA = {
-    "subject": "string <=60 chars no spam words",
-    "body": "string plain text 3-4 short paragraphs no HTML",
-    "cta": "string one clear next step e.g. 'Reply to get your free demo link'",
+    "subject": "string <=60 chars, no spam trigger words, specific to this business",
+    "body": "string, plain text, 3-4 short paragraphs, no HTML, warm and personal",
+    "cta": "string, one clear next step e.g. 'Reply to get your free preview link'",
 }
 
 
@@ -58,7 +63,6 @@ class AINotConfiguredError(AIError):
 
 
 async def _call_groq(api_key: str, prompt: str) -> str:
-    """Try each Groq model in order until one works."""
     last_error = None
     for model in GROK_MODELS:
         payload = {
@@ -67,9 +71,10 @@ async def _call_groq(api_key: str, prompt: str) -> str:
                 {
                     "role": "system",
                     "content": (
-                        "You are a branding and copywriting assistant. "
-                        "Always respond with raw JSON only — no markdown, "
-                        "no code fences, no commentary before or after."
+                        "You are a copywriting assistant for a web design agency. "
+                        "You write business content only — headlines, descriptions, services, testimonials. "
+                        "You never suggest colors, fonts, themes or any design decisions. "
+                        "Always respond with raw JSON only — no markdown, no code fences, no commentary."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -85,14 +90,14 @@ async def _call_groq(api_key: str, prompt: str) -> str:
         if resp.status_code == 429:
             raise AIQuotaError(f"Groq quota exceeded: {resp.text[:200]}")
         if resp.status_code == 404:
-            last_error = AIError(f"Model {model} not found on Groq, trying next…")
-            continue  # try next model
+            last_error = AIError(f"Model {model} not available, trying next…")
+            continue
         if resp.status_code != 200:
             raise AIError(f"Groq API error {resp.status_code}: {resp.text[:300]}")
         try:
             return resp.json()["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as e:
-            raise AIError(f"Unexpected Groq response: {e}")
+            raise AIError(f"Unexpected Groq response shape: {e}")
     raise last_error or AIError("All Groq models failed.")
 
 
@@ -110,7 +115,7 @@ async def _call_gemini(api_key: str, prompt: str) -> str:
     try:
         return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError) as e:
-        raise AIError(f"Unexpected Gemini response: {e}")
+        raise AIError(f"Unexpected Gemini response shape: {e}")
 
 
 async def _generate(db: Session, prompt: str) -> dict:
@@ -154,9 +159,11 @@ async def _generate(db: Session, prompt: str) -> dict:
 
 
 async def analyze_business(db: Session, lead: dict, niche: str) -> dict:
-    prompt = f"""You are a branding and copywriting assistant for a web design agency.
-Given the business information below, produce a JSON object matching EXACTLY this schema
-(same keys, no extra keys, no markdown, no code fences):
+    prompt = f"""You are a copywriting assistant for a web design agency.
+Write website CONTENT ONLY for a local business. Do NOT suggest colors, fonts,
+themes, or any design decisions — the template handles all visual design.
+
+Produce a JSON object matching EXACTLY this schema (same keys, no extra keys, no markdown, no code fences):
 
 {json.dumps(BUSINESS_ANALYSIS_SCHEMA, indent=2)}
 
@@ -167,26 +174,27 @@ Business information:
 Rules:
 - Output ONLY the raw JSON object. No preamble, no commentary, no ``` fences.
 - Only include sections in enabled_sections that make sense for this business.
-- Keep copy specific to this business niche and location, not generic filler.
-- Make testimonials sound plausible and natural, not obviously fake.
+- hero_title must be specific to this niche and location — never generic filler.
+- Services should reflect what this type of business actually offers (3-6 services).
+- Testimonials should sound authentic and human, not like marketing copy.
+- Keep all copy warm, professional and human — never robotic or sales-heavy.
 """
     return await _generate(db, prompt)
 
 
 async def generate_email(db: Session, lead: dict, demo_url: str | None) -> dict:
     link_instruction = (
-        f"Include this exact preview link once in the body: {demo_url}"
-        if demo_url else "Do not invent a link."
+        f"Include this exact preview link naturally once in the body: {demo_url}"
+        if demo_url else "Do not invent or include any links."
     )
-    prompt = f"""You are writing a cold outreach EMAIL (not SMS, not WhatsApp — a professional email)
-from a freelance web designer to a local business owner who currently has no modern website.
-Be warm, specific, and brief — not salesy or hyped. Mention one concrete, plausible detail
-about their business type. {link_instruction}
+    prompt = f"""You are writing a cold outreach EMAIL from a freelance web designer to a local
+business owner who currently has no modern website. Be warm, specific, and brief.
+Write like a real person — not a marketing department. {link_instruction}
 
 Return ONLY a JSON object matching this schema, no markdown or commentary:
 {json.dumps(EMAIL_SCHEMA, indent=2)}
 
-Business:
+Business details:
 {json.dumps(lead, indent=2)}
 """
     return await _generate(db, prompt)

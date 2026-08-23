@@ -320,12 +320,23 @@ async def import_leads(
 
         # Score and classify
         biz_dict = biz.model_dump()
-        website_status = classify_website_status(biz_dict)
+        website_status = classify_website_status(
+            website_url=biz.website,
+            website_reachable=None,
+            facebook_url=biz.facebook,
+            instagram_url=biz.instagram,
+        )
         if filter_disqualified(website_status):
             skipped_disqualified += 1
             continue
 
-        score = compute_lead_score(biz_dict, website_status)
+        score = compute_lead_score(
+            status=website_status,
+            google_rating=biz.google_rating,
+            review_count=biz.review_count,
+            has_phone=bool(biz.phone),
+            has_email=bool(biz.email),
+        )
 
         lead = Lead(
             business_name=biz.name,
@@ -407,12 +418,23 @@ async def import_leads_web(
             continue
 
         biz_dict = biz.model_dump()
-        website_status = classify_website_status(biz_dict)
+        website_status = classify_website_status(
+            website_url=biz.website,
+            website_reachable=None,
+            facebook_url=biz.facebook,
+            instagram_url=biz.instagram,
+        )
         if filter_disqualified(website_status):
             skipped_disqualified += 1
             continue
 
-        score = compute_lead_score(biz_dict, website_status)
+        score = compute_lead_score(
+            status=website_status,
+            google_rating=biz.google_rating,
+            review_count=biz.review_count,
+            has_phone=bool(biz.phone),
+            has_email=bool(biz.email),
+        )
         lead = Lead(
             business_name=biz.name,
             niche=biz.niche or "",
@@ -445,3 +467,24 @@ async def import_leads_web(
         "skipped_disqualified": skipped_disqualified,
         "added_leads": added_leads,
     }
+
+
+@router.delete("/{lead_id}")
+def delete_lead(
+    lead_id: str,
+    db: Session = Depends(get_db),
+    _admin=Depends(require_admin),
+):
+    """
+    Permanently delete a lead and all associated data —
+    generated websites and email drafts. Irreversible.
+    """
+    lead = db.get(Lead, lead_id)
+    if not lead:
+        raise HTTPException(404, "Lead not found")
+
+    db.query(GeneratedWebsite).filter_by(lead_id=lead_id).delete()
+    db.query(EmailDraft).filter_by(lead_id=lead_id).delete()
+    db.delete(lead)
+    db.commit()
+    return {"deleted": lead_id}

@@ -102,10 +102,7 @@ async def generate_website(req: GenerateWebsiteRequest, db: Session = Depends(ge
         business_name=lead.business_name,
         demo_token=token,
         template_key=template_key,
-        theme={
-            "recommendation": analysis.get("theme_recommendation"),
-            "colors": analysis.get("brand_colors"),
-        },
+        theme={},  # Colors fixed per template — never overridden by AI
         generated_json=analysis,
         enabled_sections=analysis.get("enabled_sections", []),
         images=images,
@@ -144,7 +141,7 @@ async def regenerate_content(website_id: str, db: Session = Depends(get_db), _ad
 
     site.generated_json = analysis
     site.enabled_sections = analysis.get("enabled_sections", [])
-    site.theme = {"recommendation": analysis.get("theme_recommendation"), "colors": analysis.get("brand_colors")}
+    site.theme = {}  # Colors fixed per template — never overridden by AI
     db.commit()
     return {"ok": True}
 
