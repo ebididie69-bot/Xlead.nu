@@ -15,37 +15,32 @@ from app.services.image_service import get_business_images
 
 router = APIRouter(prefix="/api/websites", tags=["websites"])
 
-# Niche -> which React template component renders it (see frontend/src/templates)
+# Niche -> frontend TEMPLATE_REGISTRY key (must match src/templates/index.js)
 NICHE_TEMPLATE_MAP = {
-    "gym_fitness": "GymFitnessTemplate",
-    "salon_spa": "SalonSpaTemplate",
-    "makeup_studio": "MakeupStudioTemplate",
-    "real_estate_agency": "RealEstateTemplate",
-    "dental_clinic": "DentalClinicTemplate",
-    "construction_company": "ConstructionTemplate",
-    "car_dealership": "CarDealershipTemplate",
-    "car_rental": "CarRentalTemplate",
-    "hotel_guest_house": "HotelGuestHouseTemplate",
-    "furniture_interior_design": "FurnitureInteriorTemplate",
-    "cleaning_company": "CleaningCompanyTemplate",
-    "bakery_cafe": "BakeryCafeTemplate",
-    "law_firm": "LawFirmTemplate",
-    "photography_studio": "PhotographyStudioTemplate",
-    "event_planning": "EventPlanningTemplate",
-    "auto_repair_garage": "AutoRepairTemplate",
+    "gym_fitness": "gym_fitness",
+    "salon_spa": "salon_spa",
+    "makeup_studio": "makeup_studio",
+    "real_estate_agency": "real_estate_agency",
+    "dental_clinic": "dental_clinic",
+    "construction_company": "construction_company",
+    "car_dealership": "car_dealership",
+    "car_rental": "car_rental",
+    "hotel_guest_house": "hotel_guest_house",
+    "furniture_interior_design": "furniture_interior_design",
+    "cleaning_company": "cleaning_company",
+    "bakery_cafe": "bakery_cafe",
+    "law_firm": "law_firm",
+    "photography_studio": "photography_studio",
+    "event_planning": "event_planning",
+    "auto_repair_garage": "auto_repair_garage",
 }
 
-# Templates with a real, registered multi-page React component (see
-# frontend/src/templates/index.js). Generation is blocked for anything not
-# in this set so an admin gets a clear error instead of a broken demo link.
-BUILT_TEMPLATES = set(NICHE_TEMPLATE_MAP.values())  # all 16 niches now have real templates
+BUILT_TEMPLATES = set(NICHE_TEMPLATE_MAP.values())
 
 DEMO_EXPIRY_DAYS = 30
 
 
 def _new_demo_token() -> str:
-    # 12 random chars from an unambiguous urlsafe alphabet — short enough for
-    # a clean /demo/<token> URL, long enough (>= 62^12) to not be guessable.
     return secrets.token_urlsafe(9)
 
 
@@ -66,7 +61,7 @@ async def generate_website(req: GenerateWebsiteRequest, db: Session = Depends(ge
         raise HTTPException(
             409,
             f"The '{lead.niche}' template isn't built yet — currently available: "
-            f"{', '.join(sorted(BUILT_TEMPLATES))}. Choose a lead from one of those niches for now.",
+            f"{', '.join(sorted(BUILT_TEMPLATES))}.",
         )
 
     lead_dict = {
@@ -87,10 +82,8 @@ async def generate_website(req: GenerateWebsiteRequest, db: Session = Depends(ge
 
     token = _new_demo_token()
     while db.query(GeneratedWebsite).filter_by(demo_token=token).first():
-        token = _new_demo_token()  # extremely unlikely collision, but be sure
+        token = _new_demo_token()
 
-    # Tier 1 (real photos) needs a Google Place ID, which is only present if
-    # Places enrichment ran during lead search — see lead_finder_service.py.
     place_id = (lead.raw_source_data or {}).get("place_id")
     images = await get_business_images(
         db, niche=lead.niche, place_id=place_id,
@@ -102,7 +95,7 @@ async def generate_website(req: GenerateWebsiteRequest, db: Session = Depends(ge
         business_name=lead.business_name,
         demo_token=token,
         template_key=template_key,
-        theme={},  # Colors fixed per template — never overridden by AI
+        theme={},
         generated_json=analysis,
         enabled_sections=analysis.get("enabled_sections", []),
         images=images,
@@ -118,7 +111,6 @@ async def generate_website(req: GenerateWebsiteRequest, db: Session = Depends(ge
 
 @router.post("/{website_id}/regenerate-content")
 async def regenerate_content(website_id: str, db: Session = Depends(get_db), _admin=Depends(require_admin)):
-    """Re-runs Gemini analysis for this lead, replacing the site's copy in place (same token, same images)."""
     site = db.get(GeneratedWebsite, website_id)
     if not site:
         raise HTTPException(404, "Website not found")
@@ -141,14 +133,13 @@ async def regenerate_content(website_id: str, db: Session = Depends(get_db), _ad
 
     site.generated_json = analysis
     site.enabled_sections = analysis.get("enabled_sections", [])
-    site.theme = {}  # Colors fixed per template — never overridden by AI
+    site.theme = {}
     db.commit()
     return {"ok": True}
 
 
 @router.post("/{website_id}/regenerate-images")
 async def regenerate_images(website_id: str, db: Session = Depends(get_db), _admin=Depends(require_admin)):
-    """Re-runs the tiered image search/generation (see services/image_service.py)."""
     site = db.get(GeneratedWebsite, website_id)
     if not site:
         raise HTTPException(404, "Website not found")
@@ -168,7 +159,6 @@ class ContentEditRequest(BaseModel):
 
 @router.patch("/{website_id}/content")
 def edit_content(website_id: str, req: ContentEditRequest, db: Session = Depends(get_db), _admin=Depends(require_admin)):
-    """Manual admin edits to the AI-generated copy — same JSON contract Gemini fills, admin can override any field."""
     site = db.get(GeneratedWebsite, website_id)
     if not site:
         raise HTTPException(404, "Website not found")
@@ -178,11 +168,11 @@ def edit_content(website_id: str, req: ContentEditRequest, db: Session = Depends
 
 
 @router.post("/{website_id}/screenshot")
-async def generate_screenshot(website_id: str, db: Session = Depends(get_db), _admin=Depends(require_admin)):
+async def generate_screenshot(website_id: str, db: Session = Depends(get_db), admin=Depends(require_admin)):
     site = db.get(GeneratedWebsite, website_id)
     if not site:
         raise HTTPException(404, "Website not found")
-    path = await capture_homepage_screenshot(site.demo_token)
+    path = await capture_homepage_screenshot(site.demo_token, admin=admin, db=db)
     site.screenshot_path = path
     db.commit()
     return {"screenshot_path": path}
@@ -190,12 +180,6 @@ async def generate_screenshot(website_id: str, db: Session = Depends(get_db), _a
 
 @router.get("")
 def list_websites(db: Session = Depends(get_db), _admin=Depends(require_admin)):
-    """
-    Returns full detail (including generated_json/images) for every site, not
-    just summary fields. WebsitePreview.jsx reuses this list response to avoid
-    a second endpoint — a bit more payload per row, but this list is admin-only
-    and realistically stays in the dozens/hundreds, not a scale where that matters.
-    """
     sites = db.query(GeneratedWebsite).order_by(GeneratedWebsite.created_at.desc()).all()
     return [
         {
@@ -206,7 +190,6 @@ def list_websites(db: Session = Depends(get_db), _admin=Depends(require_admin)):
         }
         for s in sites
     ]
-
 
 
 @router.patch("/{website_id}/status")

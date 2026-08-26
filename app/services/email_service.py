@@ -1,16 +1,8 @@
 """
 Email generation + sending.
 
-Generation now goes through ai_service.py which tries Grok first, then
-Gemini — so whichever AI key you have configured is used automatically,
-with graceful fallback between providers.
-
-Sending goes through the Gmail API using the admin's own OAuth token
-(scope requested at login: gmail.send) — never a generic SMTP relay,
-so it sends as the real admin Gmail account.
-
-Nothing in this module sends automatically: routers/emails.py only calls
-send_via_gmail() from an explicit "approve and send" action.
+Generation goes through ai_service.py (Grok first, Gemini fallback).
+Sending uses the Gmail API with the admin's OAuth access token.
 """
 import base64
 from email.mime.text import MIMEText
@@ -22,12 +14,10 @@ from app.core.security import decrypt
 from app.models import AdminIdentity
 from app.services.ai_service import generate_email as _ai_generate_email, AIError
 
-# Re-export so routers/emails.py doesn't need changing
 EmailGenerationError = AIError
 
 
 async def generate_email(db: Session, lead: dict, demo_url: str | None) -> dict:
-    """Delegates to ai_service.generate_email (Grok-first, Gemini fallback)."""
     return await _ai_generate_email(db, lead, demo_url)
 
 
@@ -35,7 +25,9 @@ async def send_via_gmail(admin: AdminIdentity, to_email: str, subject: str, body
     """Sends via Gmail API using the admin's stored OAuth access token. Returns the Gmail message id."""
     access_token = decrypt(admin.access_token_enc)
     if not access_token:
-        raise EmailGenerationError("No valid Gmail access token — please sign in again.")
+        raise EmailGenerationError(
+            "No valid Gmail access token — sign out and sign back in with Google to refresh permissions."
+        )
 
     message = MIMEText(body)
     message["to"] = to_email
@@ -47,6 +39,10 @@ async def send_via_gmail(admin: AdminIdentity, to_email: str, subject: str, body
             "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
             headers={"Authorization": f"Bearer {access_token}"},
             json={"raw": raw},
+        )
+    if resp.status_code == 401:
+        raise EmailGenerationError(
+            "Gmail access token expired or revoked — sign out and sign back in with Google, then try again."
         )
     if resp.status_code >= 400:
         raise EmailGenerationError(f"Gmail send failed ({resp.status_code}): {resp.text[:300]}")
