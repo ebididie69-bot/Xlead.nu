@@ -1,13 +1,11 @@
 """
-Business discovery via BizData API (https://bizdata-web.vercel.app).
+Business discovery via BizData API, Overpass (OSM), and optional Google Places.
 
-BizData is a free REST API wrapping OpenStreetMap — no API key, no signup,
-no billing. Hosted on Vercel so Render can reach it (unlike raw Overpass
-which Render's outbound IP range gets blocked from).
-
-Search radius is set to 25km by default (increased from BizData's 5km
-default which was returning too few results). Country-wide searches use
-a larger radius to cover the whole country via multiple city lookups.
+Priority:
+  1. BizData for niches with category mapping (no key required)
+  2. Overpass for niches that only exist as OSM tags (multiple mirrors)
+  3. Google Places when GOOGLE_PLACES_API_KEY is set — primary fallback if
+     Overpass/BizData fail or return too few results
 """
 import asyncio
 import httpx
@@ -20,6 +18,7 @@ BIZDATA_URL = "https://bizdata-web.vercel.app/api/businesses"
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 
 NICHE_BIZDATA_CATEGORIES = {
@@ -80,24 +79,41 @@ async def find_businesses(
     location = f"{city}, {country}" if city else country
 
     bizdata_categories = NICHE_BIZDATA_CATEGORIES.get(niche, [])
+    results: list[dict] = []
+    overpass_error: Exception | None = None
 
     if bizdata_categories:
-        results = await _find_via_bizdata(bizdata_categories, location, city, country, max_leads)
+        try:
+            results = await _find_via_bizdata(bizdata_categories, location, city, country, max_leads)
+        except Exception:
+            results = []
     elif niche in NICHE_OSM_TAGS:
-        results = await _find_via_overpass(niche, country, city, max_leads)
-    else:
-        results = []
+        try:
+            results = await _find_via_overpass(niche, country, city, max_leads)
+        except Exception as exc:
+            overpass_error = exc
+            results = []
 
-    # Optional Google Places supplement
     api_key = get_setting(db, "GOOGLE_PLACES_API_KEY")
     if api_key and len(results) < max_leads:
         try:
             google_results = await _find_via_google_places(api_key, niche, country, city, max_leads)
-            existing_names = {r["name"].lower() for r in results}
-            new_from_google = [g for g in google_results if g["name"].lower() not in existing_names]
-            results.extend(new_from_google[:max_leads - len(results)])
+            existing_names = {r["name"].lower() for r in results if r.get("name")}
+            new_from_google = [g for g in google_results if (g.get("name") or "").lower() not in existing_names]
+            results.extend(new_from_google[: max_leads - len(results)])
         except Exception:
-            pass  # Google Places is optional — don't fail if it errors
+            pass
+
+    # Only hard-fail if we have nothing and Overpass was the primary path with no Places key
+    if not results and overpass_error and not api_key:
+        raise overpass_error
+
+    if not results and overpass_error and api_key:
+        # Places was tried but also returned nothing — surface a clearer message
+        raise PlacesApiError(
+            f"Overpass mirrors are down and Google Places returned no results for this query. "
+            f"Try a specific city, or retry in a few minutes. Overpass error: {overpass_error}"
+        )
 
     await _check_reachability(results)
     return results[:max_leads]
@@ -155,7 +171,7 @@ async def _bizdata_fetch(
             "location": location,
             "category": category,
             "limit": min(limit, 500),
-            "radius_km": 25,  # increased from default 5km — gets far more results
+            "radius_km": 25,
         },
     )
     resp.raise_for_status()
@@ -299,7 +315,7 @@ async def _find_via_overpass(
                 resp = None
 
         if resp is None:
-            raise last_error
+            raise last_error or RuntimeError("All Overpass mirrors failed")
 
         elements = resp.json().get("elements", [])
 
