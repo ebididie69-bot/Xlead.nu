@@ -1,10 +1,12 @@
 """
 Database engine and session management.
 
-SQLite is used for simplicity and zero infra cost. For production beyond a
-single admin's personal use, swap DATABASE_URL for Postgres (e.g. Supabase /
-Neon free tier) since SQLite files do NOT persist on Vercel's serverless
-filesystem — see README "Deployment notes".
+Supports:
+  - SQLite locally (default if DATABASE_URL is unset)
+  - Postgres on Render / Railway / Neon (set DATABASE_URL)
+
+Neon requires SSL. Connection strings look like:
+  postgresql://user:pass@ep-xxx.region.aws.neon.tech/neondb?sslmode=require
 """
 import os
 from sqlalchemy import create_engine
@@ -12,15 +14,27 @@ from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./leadforge.db")
 
-# Railway (and Heroku-style) Postgres add-ons hand out a connection string
-# starting with "postgres://", which SQLAlchemy 2.0 rejects outright —
-# it requires the "postgresql://" scheme. Normalize it here rather than
-# requiring every deploy to remember to edit the env var by hand.
+# Heroku/Railway-style URLs use postgres:// — SQLAlchemy 2 needs postgresql://
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=connect_args)
+is_sqlite = DATABASE_URL.startswith("sqlite")
+
+if is_sqlite:
+    connect_args = {"check_same_thread": False}
+    engine = create_engine(DATABASE_URL, connect_args=connect_args)
+else:
+    # Neon and most managed Postgres require TLS.
+    # sslmode=require in the URL is enough for psycopg/libpq; we also pass
+    # connect_args so SSL is enforced even if the query string was omitted.
+    connect_args = {"sslmode": "require"}
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args=connect_args,
+        pool_pre_ping=True,   # drop dead connections after Neon scale-to-zero
+        pool_recycle=300,     # recycle before idle timeout surprises us
+    )
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -39,5 +53,5 @@ def get_db():
 
 def init_db():
     """Create all tables. Called once at app startup."""
-    from app import models  # noqa: F401 (ensures models are registered)
+    from app import models  # noqa: F401 — register models on Base.metadata
     Base.metadata.create_all(bind=engine)
