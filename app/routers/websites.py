@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import get_db
 from app.core.security import require_admin
@@ -15,7 +16,6 @@ from app.services.image_service import get_business_images
 
 router = APIRouter(prefix="/api/websites", tags=["websites"])
 
-# Niche -> frontend TEMPLATE_REGISTRY key (must match src/templates/index.js)
 NICHE_TEMPLATE_MAP = {
     "gym_fitness": "gym_fitness",
     "salon_spa": "salon_spa",
@@ -106,7 +106,12 @@ async def generate_website(req: GenerateWebsiteRequest, db: Session = Depends(ge
     db.commit()
     db.refresh(site)
 
-    return {"id": site.id, "demo_token": site.demo_token, "status": site.status}
+    return {
+        "id": site.id,
+        "demo_token": site.demo_token,
+        "status": site.status,
+        "image_slots": list((images or {}).keys()),
+    }
 
 
 @router.post("/{website_id}/regenerate-content")
@@ -134,6 +139,8 @@ async def regenerate_content(website_id: str, db: Session = Depends(get_db), _ad
     site.generated_json = analysis
     site.enabled_sections = analysis.get("enabled_sections", [])
     site.theme = {}
+    flag_modified(site, "generated_json")
+    flag_modified(site, "enabled_sections")
     db.commit()
     return {"ok": True}
 
@@ -145,12 +152,19 @@ async def regenerate_images(website_id: str, db: Session = Depends(get_db), _adm
         raise HTTPException(404, "Website not found")
     lead = db.get(Lead, site.lead_id)
     place_id = (lead.raw_source_data or {}).get("place_id")
-    site.images = await get_business_images(
+    images = await get_business_images(
         db, niche=lead.niche, place_id=place_id,
         website=lead.website, facebook=lead.facebook, instagram=lead.instagram,
     )
+    site.images = images
+    flag_modified(site, "images")
     db.commit()
-    return {"ok": True, "images": site.images}
+    return {
+        "ok": True,
+        "slot_count": len(images or {}),
+        "slots": list((images or {}).keys()),
+        "images": images,
+    }
 
 
 class ContentEditRequest(BaseModel):
@@ -163,6 +177,7 @@ def edit_content(website_id: str, req: ContentEditRequest, db: Session = Depends
     if not site:
         raise HTTPException(404, "Website not found")
     site.generated_json = req.generated_json
+    flag_modified(site, "generated_json")
     db.commit()
     return {"ok": True}
 
