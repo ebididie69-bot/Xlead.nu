@@ -31,13 +31,12 @@ async def generate(
     if not lead:
         raise HTTPException(404, "Lead not found")
 
-    # Email address not required to generate — admin may want to draft first
-    # and add email later. Sending will block without an email.
     site = db.query(GeneratedWebsite).filter_by(lead_id=lead.id).first()
     demo_url = None
     if site:
-        frontend_url = get_setting(db, "FRONTEND_URL") or ""
-        demo_url = f"{frontend_url}/demo/{site.demo_token}"
+        import os
+        frontend_url = get_setting(db, "FRONTEND_URL") or os.getenv("FRONTEND_URL") or ""
+        demo_url = f"{frontend_url.rstrip('/')}/demo/{site.demo_token}"
 
     lead_dict = {
         "name": lead.business_name,
@@ -99,6 +98,7 @@ def list_emails(
             "body": d.body,
             "cta": d.cta,
             "status": d.status,
+            "failure_reason": getattr(d, "failure_reason", None),
             "created_at": str(d.created_at) if d.created_at else None,
             "sent_at": str(d.sent_at) if d.sent_at else None,
         }
@@ -113,7 +113,6 @@ def edit_draft(
     db: Session = Depends(get_db),
     _admin=Depends(require_admin),
 ):
-    """Admin edits subject/body before approving — editing an approved draft resets it to draft."""
     draft = db.get(EmailDraft, draft_id)
     if not draft:
         raise HTTPException(404, "Draft not found")
@@ -121,9 +120,9 @@ def edit_draft(
         raise HTTPException(400, "Cannot edit an already-sent email")
     for field, value in req.model_dump(exclude_unset=True).items():
         setattr(draft, field, value)
-    # Reset approval if edited
-    if draft.status == "approved":
+    if draft.status in ("approved", "failed"):
         draft.status = "draft"
+        draft.failure_reason = None
     db.commit()
     return {"id": draft.id, "status": draft.status, "subject": draft.subject, "body": draft.body, "cta": draft.cta}
 
@@ -137,7 +136,10 @@ def approve_draft(
     draft = db.get(EmailDraft, draft_id)
     if not draft:
         raise HTTPException(404, "Draft not found")
+    if draft.status == "sent":
+        raise HTTPException(400, "Already sent")
     draft.status = "approved"
+    draft.failure_reason = None
     db.commit()
     return {"id": draft.id, "status": draft.status}
 
@@ -150,26 +152,32 @@ async def send_draft(
 ):
     """
     Explicit send — the ONLY code path that calls Gmail API.
-    Requires status=='approved' and a valid email address on the lead.
+    Requires status=='approved' and a valid email on the lead.
     """
     draft = db.get(EmailDraft, draft_id)
     if not draft:
         raise HTTPException(404, "Draft not found")
     if draft.status != "approved":
-        raise HTTPException(400, "Only approved drafts can be sent")
-
-    lead = db.get(Lead, draft.lead_id)
-    if not lead or not lead.email:
         raise HTTPException(
             400,
-            "This lead has no email address — add one via the Lead Finder manual entry form, then try again"
+            f"Only approved drafts can be sent (current status: {draft.status}). "
+            f"If failed, click Approve again first."
+            + (f" Last error: {draft.failure_reason}" if draft.failure_reason else ""),
+        )
+
+    lead = db.get(Lead, draft.lead_id)
+    if not lead or not (lead.email or "").strip():
+        raise HTTPException(
+            400,
+            "This lead has no email address — fix the lead email in Lead Finder / re-import, then try again",
         )
 
     try:
-        message_id = await send_via_gmail(admin, lead.email, draft.subject, draft.body)
+        message_id = await send_via_gmail(db, admin, lead.email.strip(), draft.subject, draft.body)
         draft.status = "sent"
         draft.gmail_message_id = message_id
         draft.sent_at = datetime.utcnow()
+        draft.failure_reason = None
     except Exception as e:
         draft.status = "failed"
         draft.failure_reason = str(e)
