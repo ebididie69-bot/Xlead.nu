@@ -24,8 +24,7 @@ def _u(photo_id: str, w: int = 1600) -> str:
     return f"https://images.unsplash.com/{photo_id}?auto=format&fit=crop&w={w}&q=80"
 
 
-# Curated packs for the 5 test niches — same hero for every lead in that niche.
-# Photo IDs are public Unsplash CDN paths (reliable, no API key needed).
+# Curated packs — stable Unsplash CDN URLs (no API key). Same hero for every lead in niche.
 NICHE_IMAGE_PACKS: dict[str, dict[str, dict]] = {
     "cleaning_company": {
         "hero": {"url": _u("photo-1581578731548-c64695cc6952"), "source": "stock", "alt": "Professional cleaner"},
@@ -66,6 +65,62 @@ NICHE_IMAGE_PACKS: dict[str, dict[str, dict]] = {
         "gallery_2": {"url": _u("photo-1540497077202-7c8a3999166f"), "source": "stock", "alt": "Gym equipment"},
         "gallery_3": {"url": _u("photo-1581009146145-b5ef439e1539"), "source": "stock", "alt": "Strength training"},
         "gallery_4": {"url": _u("photo-1576678927484-cc907957088c"), "source": "stock", "alt": "Cardio workout"},
+    },
+    "construction_company": {
+        "hero": {"url": _u("photo-1503387762-592deb58ef4e"), "source": "stock", "alt": "Modern architecture build"},
+        "about": {"url": _u("photo-1541888946425-d81bb19240f5"), "source": "stock", "alt": "Construction site"},
+        "gallery_1": {"url": _u("photo-1486406146926-c627a92ad1ab"), "source": "stock", "alt": "Commercial building"},
+        "gallery_2": {"url": _u("photo-1504307651254-35680f356dfd"), "source": "stock", "alt": "Building under construction"},
+        "gallery_3": {"url": _u("photo-1590274853856-f22d5ee3dc76"), "source": "stock", "alt": "Luxury residence exterior"},
+        "gallery_4": {"url": _u("photo-1600585154340-be6161a56a0c"), "source": "stock", "alt": "Finished modern home"},
+    },
+    "bakery_cafe": {
+        "hero": {"url": _u("photo-1495474472287-4d71bcdd2085"), "source": "stock", "alt": "Latte art coffee"},
+        "about": {"url": _u("photo-1509042239860-f550ce710b93"), "source": "stock", "alt": "Fresh coffee pour"},
+        "gallery_1": {"url": _u("photo-1555507036-ab1f4038808a"), "source": "stock", "alt": "Artisan bakery"},
+        "gallery_2": {"url": _u("photo-1511920170033-f8396924c348"), "source": "stock", "alt": "Cafe interior"},
+        "gallery_3": {"url": _u("photo-1554118811-1e0d58224f24"), "source": "stock", "alt": "Coffee and pastry"},
+        "gallery_4": {"url": _u("photo-1445116572660-236099ec97a0"), "source": "stock", "alt": "Cozy cafe seating"},
+    },
+    "hotel_guest_house": {
+        "hero": {"url": _u("photo-1618773928121-c32242e63f39"), "source": "stock", "alt": "Luxury hotel bedroom"},
+        "about": {"url": _u("photo-1566073771259-6a8506099945"), "source": "stock", "alt": "Hotel lobby"},
+        "gallery_1": {"url": _u("photo-1582719478250-c89cae4dc85b"), "source": "stock", "alt": "Hotel suite"},
+        "gallery_2": {"url": _u("photo-1571896349842-33c89424de2d"), "source": "stock", "alt": "Resort pool"},
+        "gallery_3": {"url": _u("photo-1520250497591-112f2f40a3f4"), "source": "stock", "alt": "Boutique hotel room"},
+        "gallery_4": {"url": _u("photo-1445019980597-93fa8acb246c"), "source": "stock", "alt": "Hotel exterior night"},
+    },
+    "auto_repair_garage": {
+        "hero": {"url": _u("photo-1486262715619-577d19e02654"), "source": "stock", "alt": "Auto mechanic at work"},
+        "about": {"url": _u("photo-1619642751034-765dfdf7c58e"), "source": "stock", "alt": "Car service garage"},
+        "gallery_1": {"url": _u("photo-1492144534655-ae79c964c9d7"), "source": "stock", "alt": "Premium vehicle"},
+        "gallery_2": {"url": _u("photo-1632829882891-5047ccc374e1"), "source": "stock", "alt": "Engine diagnostics"},
+        "gallery_3": {"url": _u("photo-1625047509248-ec889cbff17f"), "source": "stock", "alt": "Car detailing"},
+        "gallery_4": {"url": _u("photo-1503376780353-7e6692767b70"), "source": "stock", "alt": "Luxury car exterior"},
+    },
+    "car_rental": {
+        "hero": {"url": _u("photo-1494976388531-d1058494cdd8"), "source": "stock", "alt": "Premium rental car"},
+        "about": {"url": _u("photo-1502877338535-766e1452684b"), "source": "stock", "alt": "Sports car"},
+        "gallery_1": {"url": _u("photo-1552519507-da3b142c6e3d"), "source": "stock", "alt": "Red sports coupe"},
+        "gallery_2": {"url": _u("photo-1549317661-bd32c8ce0db2"), "source": "stock", "alt": "SUV on road"},
+        "gallery_3": {"url": _u("photo-1519641471654-76ce0107ad1b"), "source": "stock", "alt": "Luxury sedan"},
+        "gallery_4": {"url": _u("photo-1563720223185-11003d516935"), "source": "stock", "alt": "Black luxury car"},
+    },
+    "event_planning": {
+        "hero": {"url": _u("photo-1519167758481-83f550bb49b3"), "source": "stock", "alt": "Elegant event ballroom"},
+        "about": {"url": _u("photo-1464366400600-7168b8af9bc3"), "source": "stock", "alt": "Wedding reception"},
+        "gallery_1": {"url": _u("photo-1478144592103-25e304f24786"), "source": "stock", "alt": "Table setting"},
+        "gallery_2": {"url": _u("photo-1511795409834-ef04bbd61622"), "source": "stock", "alt": "Celebration dinner"},
+        "gallery_3": {"url": _u("photo-1505236858219-8359eb29e329"), "source": "stock", "alt": "Event decor lights"},
+        "gallery_4": {"url": _u("photo-1530103862676-de8c9debad1d"), "source": "stock", "alt": "Party balloons"},
+    },
+    "makeup_studio": {
+        "hero": {"url": _u("photo-1522337360788-8b13dee7a37e"), "source": "stock", "alt": "Beauty makeup artist"},
+        "about": {"url": _u("photo-1487412947147-5cebf100ffc2"), "source": "stock", "alt": "Makeup brushes"},
+        "gallery_1": {"url": _u("photo-1512496015851-a90fb38ba796"), "source": "stock", "alt": "Glamour makeup"},
+        "gallery_2": {"url": _u("photo-1596462502278-27bfdc403348"), "source": "stock", "alt": "Cosmetic products"},
+        "gallery_3": {"url": _u("photo-1560066984-138dadb4c035"), "source": "stock", "alt": "Salon vanity"},
+        "gallery_4": {"url": _u("photo-1522335789203-aabd1fc54bc9"), "source": "stock", "alt": "Hair and beauty"},
     },
 }
 
@@ -280,7 +335,6 @@ async def get_business_images(
     if place_id and len(images) < needed:
         images += await _fetch_places_photos(db, place_id, needed - len(images))
 
-    # Curated pack fills remaining slots with premium niche look
     if len(images) < needed:
         pack = _niche_pack(niche)
         for item in pack:
