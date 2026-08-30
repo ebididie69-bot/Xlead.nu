@@ -106,6 +106,93 @@ def list_emails(
     ]
 
 
+@router.get("/diagnose")
+async def diagnose_gmail(
+    db: Session = Depends(get_db),
+    admin: AdminIdentity = Depends(require_admin),
+):
+    """
+    Diagnostic endpoint — checks every prerequisite for Gmail sending
+    without actually sending anything.
+    """
+    import os
+    from app.core.security import decrypt
+    from app.services.email_service import _ensure_access_token
+
+    checks = {}
+
+    has_refresh = bool(admin.refresh_token_enc and decrypt(admin.refresh_token_enc))
+    checks["refresh_token_stored"] = {
+        "ok": has_refresh,
+        "message": "Refresh token found" if has_refresh else
+            "No refresh token. Sign out, revoke app access at "
+            "https://myaccount.google.com/permissions, then sign in again and accept all permissions.",
+    }
+
+    access_token = None
+    if has_refresh:
+        try:
+            access_token = await _ensure_access_token(db, admin)
+            checks["access_token_valid"] = {"ok": True, "message": "Access token obtained successfully"}
+        except Exception as e:
+            checks["access_token_valid"] = {"ok": False, "message": str(e)}
+    else:
+        checks["access_token_valid"] = {"ok": False, "message": "Skipped — no refresh token"}
+
+    if access_token:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+            if resp.status_code == 200:
+                profile = resp.json()
+                checks["gmail_api_accessible"] = {
+                    "ok": True,
+                    "message": f"Gmail API accessible. Sending as: {profile.get('emailAddress')}",
+                }
+            elif resp.status_code == 403:
+                checks["gmail_api_accessible"] = {
+                    "ok": False,
+                    "message": (
+                        "Gmail API returned 403 — the Gmail API is not enabled or the "
+                        "gmail.send scope was not granted. Enable it at "
+                        "https://console.cloud.google.com/apis/library/gmail.googleapis.com "
+                        "then sign out, revoke at https://myaccount.google.com/permissions, "
+                        "and sign in again."
+                    ),
+                }
+            else:
+                checks["gmail_api_accessible"] = {
+                    "ok": False,
+                    "message": f"Gmail API returned {resp.status_code}: {resp.text[:200]}",
+                }
+        except Exception as e:
+            checks["gmail_api_accessible"] = {"ok": False, "message": f"Network error: {e}"}
+    else:
+        checks["gmail_api_accessible"] = {"ok": False, "message": "Skipped — no access token"}
+
+    client_id = get_setting(db, "GOOGLE_OAUTH_CLIENT_ID") or os.getenv("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = get_setting(db, "GOOGLE_OAUTH_CLIENT_SECRET") or os.getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+    checks["oauth_client_configured"] = {
+        "ok": bool(client_id and client_secret),
+        "message": "OAuth client ID and secret found" if (client_id and client_secret)
+            else "Missing GOOGLE_OAUTH_CLIENT_ID or GOOGLE_OAUTH_CLIENT_SECRET in Settings or env vars",
+    }
+
+    leads_with_email = db.query(Lead).filter(Lead.email.isnot(None)).filter(Lead.email != "").count()
+    checks["leads_have_emails"] = {
+        "ok": leads_with_email > 0,
+        "message": f"{leads_with_email} lead(s) have email addresses" if leads_with_email > 0
+            else "No leads have email addresses — add emails via Lead Finder manual entry",
+    }
+
+    overall_ok = all(c["ok"] for c in checks.values())
+    return {"ok": overall_ok, "checks": checks}
+
+
 @router.patch("/{draft_id}")
 def edit_draft(
     draft_id: str,
