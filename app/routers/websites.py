@@ -153,15 +153,23 @@ async def regenerate_images(website_id: str, db: Session = Depends(get_db), _adm
     lead = db.get(Lead, site.lead_id)
     place_id = (lead.raw_source_data or {}).get("place_id")
     images = await get_business_images(
-        db, niche=lead.niche, place_id=place_id,
-        website=lead.website, facebook=lead.facebook, instagram=lead.instagram,
+        db,
+        niche=lead.niche,
+        place_id=place_id,
+        website=lead.website,
+        facebook=lead.facebook,
+        instagram=lead.instagram,
+        prefer_pack=True,  # curated unique slots first — no hero repeats
     )
     site.images = images
     flag_modified(site, "images")
     db.commit()
+    urls = [((images or {}).get(s) or {}).get("url") for s in ("hero", "about", "gallery_1", "gallery_2", "gallery_3", "gallery_4")]
+    uniq = len({(u or "").split("?")[0] for u in urls if u})
     return {
         "ok": True,
         "slot_count": len(images or {}),
+        "unique_urls": uniq,
         "slots": list((images or {}).keys()),
         "images": images,
     }
